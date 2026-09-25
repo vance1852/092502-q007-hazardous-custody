@@ -9,8 +9,21 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .errors import DomainError, ValidationError
+from .ledger import LedgerService
 from .service import DomainService
 from .storage import Database
+
+
+def _view(value):
+    """把数据对象递归转换为可 JSON 序列化的字典。"""
+
+    if hasattr(value, "__dict__"):
+        return {key: _view(item) for key, item in value.__dict__.items()}
+    if isinstance(value, (list, tuple)):
+        return [_view(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _view(item) for key, item in value.items()}
+    return value
 
 
 def route(service: DomainService, method: str, path: str, body: dict[str, Any] | None,
@@ -20,7 +33,9 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
     headers = headers or {}
     body = body or {}
     parsed = urlparse(path)
+    query = parse_qs(parsed.query)
     actor_id = headers.get("X-Actor-Id", "")
+    ledger = service if isinstance(service, LedgerService) else None
     try:
         if method == "GET" and parsed.path == "/health":
             valid, count = service.verify_audit()
@@ -38,16 +53,64 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
             receipt = service.record_domain_data(actor_id=actor_id, **body)
             return 200 if receipt.replayed else 201, receipt.__dict__
         if method == "GET" and parsed.path == "/domain-records":
-            query = parse_qs(parsed.query)
             site_id = query.get("site_id", [""])[0]
             if not site_id:
                 raise ValidationError("site_id 不能为空")
             category = query.get("category", [None])[0]
             return 200, {"items": [item.__dict__ for item in service.list_domain_data(site_id, category)]}
         if method == "GET" and parsed.path == "/audit-events":
-            query = parse_qs(parsed.query)
             after = int(query.get("after_sequence", ["0"])[0])
             return 200, {"items": service.audit_events(after)}
+        if ledger is not None and method == "POST" and parsed.path == "/containers":
+            receipt = ledger.register_container(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "POST" and parsed.path == "/containers/reweigh":
+            receipt = ledger.reweigh_container(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "GET" and parsed.path == "/containers":
+            site_id = query.get("site_id", [""])[0]
+            if not site_id:
+                raise ValidationError("site_id 不能为空")
+            status = query.get("status", [None])[0]
+            return 200, {"items": [item.__dict__ for item in ledger.list_containers(site_id, status)]}
+        if ledger is not None and method == "POST" and parsed.path == "/remix-authorizations":
+            receipt = ledger.authorize_remix(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "POST" and parsed.path == "/remixes":
+            receipt = ledger.execute_remix(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "POST" and parsed.path == "/handovers":
+            receipt = ledger.initiate_handover(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "POST" and parsed.path == "/handover-responses":
+            receipt = ledger.respond_handover(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "POST" and parsed.path == "/statements":
+            receipt = ledger.submit_statement(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "POST" and parsed.path == "/arbitrations":
+            receipt = ledger.arbitrate_discrepancy(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.response
+        if ledger is not None and method == "GET" and parsed.path.startswith("/handovers/"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 3 and parts[2] == "statements":
+                return 200, {"items": ledger.list_statements(parts[1])}
+            handover_id = parts[-1]
+            return 200, _view(ledger.get_handover(handover_id))
+        if ledger is not None and method == "GET" and parsed.path == "/discrepancies":
+            site_id = query.get("site_id", [None])[0]
+            status = query.get("status", [None])[0]
+            handover_id = query.get("handover_id", [None])[0]
+            return 200, {"items": [_view(item) for item in
+                                   ledger.list_discrepancies(site_id=site_id, status=status,
+                                                             handover_id=handover_id)]}
+        if ledger is not None and method == "GET" and parsed.path.startswith("/containers/") \
+                and parsed.path.endswith("/trace"):
+            parts = parsed.path.strip("/").split("/")
+            return 200, _view(ledger.trace_container(parts[1]))
+        if ledger is not None and method == "GET" and parsed.path.startswith("/containers/"):
+            container_id = parsed.path.rsplit("/", 1)[-1]
+            return 200, _view(ledger.get_container(container_id))
         return 404, {"error": "route_not_found", "message": "接口不存在"}
     except DomainError as exc:
         return exc.status, {"error": exc.code, "message": str(exc)}
@@ -99,7 +162,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
     database = Database(args.database)
-    Handler.service = DomainService(database)
+    Handler.service = LedgerService(database)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:
         server.serve_forever()
