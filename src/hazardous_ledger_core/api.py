@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .errors import DomainError, ValidationError
+from .handover import HandoverService
 from .service import DomainService
 from .storage import Database
 
@@ -21,6 +22,8 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
     body = body or {}
     parsed = urlparse(path)
     actor_id = headers.get("X-Actor-Id", "")
+    handover = HandoverService(service.database, domain=service)
+    parts = [segment for segment in parsed.path.split("/") if segment]
     try:
         if method == "GET" and parsed.path == "/health":
             valid, count = service.verify_audit()
@@ -48,6 +51,42 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
             query = parse_qs(parsed.query)
             after = int(query.get("after_sequence", ["0"])[0])
             return 200, {"items": service.audit_events(after)}
+
+        # ------------------------------------------------ 危废交接账本
+        if method == "POST" and parsed.path == "/containers":
+            receipt = handover.register_container(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "POST" and parsed.path == "/transformation-authorizations":
+            receipt = handover.authorize_transformation(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "POST" and parsed.path == "/containers/split":
+            receipt = handover.split_container(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "POST" and parsed.path == "/containers/merge":
+            receipt = handover.merge_containers(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "POST" and parsed.path == "/manifests":
+            receipt = handover.initiate_manifest(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "POST" and parsed.path == "/manifests/decide":
+            receipt = handover.decide_manifest(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "POST" and parsed.path == "/manifests/close":
+            receipt = handover.close_manifest(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "POST" and parsed.path == "/discrepancies/rule":
+            receipt = handover.rule_discrepancy(actor_id=actor_id, **body)
+            return 200 if receipt.replayed else 201, receipt.__dict__
+        if method == "GET" and len(parts) == 2 and parts[0] == "containers":
+            return 200, handover.get_container(parts[1]).__dict__
+        if method == "GET" and len(parts) == 3 and parts[0] == "containers" and parts[2] == "trace":
+            return 200, handover.trace_container(parts[1])
+        if method == "GET" and len(parts) == 2 and parts[0] == "manifests":
+            return 200, handover.get_manifest(parts[1])
+        if method == "GET" and parsed.path == "/discrepancies":
+            query = parse_qs(parsed.query)
+            site_id = query.get("site_id", [None])[0]
+            return 200, {"items": handover.list_open_discrepancies(site_id)}
         return 404, {"error": "route_not_found", "message": "接口不存在"}
     except DomainError as exc:
         return exc.status, {"error": exc.code, "message": str(exc)}

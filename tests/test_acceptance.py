@@ -11,6 +11,11 @@ class AcceptanceTest(unittest.TestCase):
         self.assertFalse(result["first_replayed"])
         self.assertTrue(result["second_replayed"])
         self.assertEqual(1, result["records"])
+        self.assertTrue(result["discrepancy_raised"])
+        self.assertTrue(result["reopen_blocked"])
+        self.assertEqual("bin-001", result["trace_source"])
+        self.assertEqual("carrier-001", result["trace_destination"])
+        self.assertEqual(50.4, result["final_weight"])
 
 
 if __name__ == "__main__":

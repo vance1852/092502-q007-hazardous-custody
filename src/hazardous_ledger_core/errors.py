@@ -33,3 +33,17 @@ class ConflictError(DomainError):
 
     code = "conflict"
     status = 409
+
+
+class StateError(DomainError):
+    """业务对象当前状态不允许该操作（如已结案联单被旧消息重开）。"""
+
+    code = "state_error"
+    status = 409
+
+
+class DiscrepancyError(DomainError):
+    """重量或封签与申报不一致，需要容差结案或质量裁决。"""
+
+    code = "discrepancy"
+    status = 409
